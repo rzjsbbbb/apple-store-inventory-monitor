@@ -33,6 +33,18 @@ export interface Target {
   productName: string;
 }
 
+/** 一次「某门店某型号有货」的目击记录，由后端持久化。 */
+export interface Hit {
+  atMs: number;
+  locale: string;
+  storeNumber: string;
+  storeTitle: string;
+  partNumber: string;
+  productName: string;
+  /** Apple 返回的 pickupDisplay 原值，如 available。 */
+  pickupDisplay: string;
+}
+
 export interface PickupDetails {
   pickupDisplay: string;
   pickupQuote: string | null;
@@ -256,6 +268,18 @@ function describeTransportFailure(raw: string): string {
 /** 这一行的数据是否已经不可信。 */
 export function isUntrusted(a: Availability): boolean {
   return a.kind === "unknown" && a.reason !== "not_yet_checked";
+}
+
+/**
+ * 带日期的本地时间，用于命中历史。
+ *
+ * 与 formatTime 分开：监控列表里「几点几分查的」只关心今天，历史要跨天，
+ * 没有日期的话「03:14」根本分不清是昨晚还是上周。
+ */
+export function formatDateTime(ms: number): string {
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 export function formatTime(ms: number | null): string {

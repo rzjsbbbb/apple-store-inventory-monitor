@@ -5,6 +5,7 @@ import {
   BellRing,
   Clock3,
   Download,
+  History,
   MapPin,
   PackageCheck,
   PackageX,
@@ -38,6 +39,15 @@ import {
   PopoverTitle,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Select,
@@ -70,6 +80,9 @@ import {
   openReleasePage,
   openTargetProduct,
   refreshProducts,
+  clearHits,
+  exportHits,
+  loadHits,
   refreshStores,
   saveSettings,
   setCategory,
@@ -83,6 +96,8 @@ import {
 } from "@/lib/store";
 import {
   type Availability,
+  type Hit,
+  formatDateTime,
   type PickupDetails,
   type Category,
   type OpenOnHit,
@@ -138,6 +153,121 @@ function StatusBadge({ availability, pickupDetails }: { availability: Availabili
       </TooltipTrigger>
       <TooltipContent className="max-w-90">{detail}</TooltipContent>
     </Tooltip>
+  );
+}
+
+function HitHistory({
+  hits,
+  loading,
+  error,
+}: {
+  hits: Hit[];
+  loading: boolean;
+  error: string | null;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        // 每次打开都重取。历史由后端按目标合并写盘，前端猜不出哪条被合并了，
+        // 与其维护一份会漂移的副本，不如打开时读一次文件里的真相。
+        if (next) void loadHits();
+      }}
+    >
+      <DialogTrigger asChild>
+        <Button
+          variant="ghost"
+          size="xs"
+          className="text-muted-foreground hover:text-foreground"
+          aria-label="查看命中历史"
+        >
+          <History aria-hidden="true" /> 历史
+        </Button>
+      </DialogTrigger>
+      {/* 必须写成 sm: 变体：DialogContent 自带 sm:max-w-lg，而 tailwind-merge
+          不跨响应式变体合并 —— 写成不带前缀的 max-w-* 会被 sm:max-w-lg 压掉，
+          对话框在 640px 以上一直卡在 512px 宽。 */}
+      <DialogContent className="sm:max-w-[min(92vw,52rem)]">
+        <DialogHeader>
+          <DialogTitle>命中历史</DialogTitle>
+          <DialogDescription className="leading-5">
+            每次确认有货都会留档，持续有货只记一次。用它判断某家店大概什么时段补货。
+            记录保存在本机，不会上传。
+          </DialogDescription>
+        </DialogHeader>
+
+        {error ? (
+          <Alert variant="destructive">
+            <AlertTriangle aria-hidden="true" />
+            <AlertTitle>历史读不出来</AlertTitle>
+            {/* 这里不能显示成「暂无记录」：那会让用户以为自己从没抢到过。 */}
+            <AlertDescription className="break-words select-text">{error}</AlertDescription>
+          </Alert>
+        ) : (
+          <ScrollArea
+            // min-w-0：ScrollArea 是 DialogContent 这个 grid 的子项，grid 子项的
+            // min-width 默认 auto，不解开的话它会被表格撑到内容宽度，滚动区域
+            // 名存实亡，表格直接冲出对话框。
+            className="max-h-[55vh] min-h-24 w-full min-w-0"
+          >
+            {loading && hits.length === 0 ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">正在读取…</p>
+            ) : hits.length === 0 ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">
+                还没有命中记录。监控到有货后会自动出现在这里。
+              </p>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="px-3 text-xs text-muted-foreground">时间</TableHead>
+                    <TableHead className="px-3 text-xs text-muted-foreground">门店</TableHead>
+                    <TableHead className="px-3 text-xs text-muted-foreground">型号</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {hits.map((hit) => (
+                    <TableRow key={`${hit.atMs}-${hit.storeNumber}-${hit.partNumber}`}>
+                      <TableCell className="px-3 align-top font-mono text-xs tabular-nums whitespace-nowrap select-text">
+                        {formatDateTime(hit.atMs)}
+                      </TableCell>
+                      {/* 允许换行而不是截断：这是一份用来回看的记录，不是实时
+                          状态栏，看全比排得齐整重要。配合上面的 min-w-0，
+                          最长的 Mac 展示名也只是多占一行，不会撑破对话框。 */}
+                      <TableCell className="px-3 text-xs break-words whitespace-normal select-text">
+                        {hit.storeTitle}
+                        <span className="ml-1 text-muted-foreground">[{hit.storeNumber}]</span>
+                      </TableCell>
+                      <TableCell className="px-3 text-xs break-words whitespace-normal select-text">
+                        {hit.productName}
+                        <span className="ml-1 text-muted-foreground">[{hit.partNumber}]</span>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </ScrollArea>
+        )}
+
+        <DialogFooter className="sm:justify-between">
+          <span className="text-xs text-muted-foreground" aria-live="polite">
+            共 {hits.length} 条
+          </span>
+          <div className="flex gap-2">
+            <Button variant="ghost" size="sm" disabled={hits.length === 0} onClick={() => void clearHits()}>
+              <Trash2 aria-hidden="true" /> 清空
+            </Button>
+            <Button variant="outline" size="sm" disabled={hits.length === 0} onClick={() => void exportHits()}>
+              <Download aria-hidden="true" /> 导出 CSV
+            </Button>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -813,7 +943,10 @@ export default function App() {
                     <SquareTerminal className="size-4 text-muted-foreground" aria-hidden="true" />
                     <h2 id="activity-log-title" className="text-sm font-semibold">活动日志</h2>
                   </div>
-                  <span className="text-[11px] tabular-nums text-muted-foreground">{ui.logs.length} 条</span>
+                  <div className="flex items-center gap-1">
+                    <HitHistory hits={ui.hits} loading={ui.hitsLoading} error={ui.hitsError} />
+                    <span className="text-[11px] tabular-nums text-muted-foreground">{ui.logs.length} 条</span>
+                  </div>
                 </div>
                 <ScrollArea className="min-h-0 flex-1 p-3.5">
                   <pre className="font-mono text-[11px] leading-[1.65] whitespace-pre-wrap text-muted-foreground select-text">

@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use apw_core::catalog::Catalog;
 use apw_core::config::{MIN_INTERVAL_SECONDS, OpenOnHit, Settings, SettingsStore};
+use apw_core::history::{Hit, HitLog};
 use apw_core::model::{Category, Product, REGIONS, Store, Target, region_by_locale};
 use apw_core::notify::{Bark, Multi, Notification, Notifier, Sound};
 use apw_core::watcher::{Event, TargetState, Watcher, WatcherConfig};
@@ -60,6 +61,8 @@ struct AppState {
     settings: RwLock<Settings>,
     /// 为 `None` 表示配置不可持久化（目录不可写，或上次读取失败已放弃写盘）。
     store: Option<SettingsStore>,
+    /// 命中历史。为 `None` 表示找不到配置目录，此时只是不留档，监控照常。
+    hits: Option<HitLog>,
 }
 
 impl AppState {
@@ -156,6 +159,53 @@ async fn refresh_stores(
         .refresh_stores(region, &state.http)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// 最近的命中记录，最新的在前。
+///
+/// 历史读不出来时返回错误而不是空列表：空列表的意思是「从没命中过」，
+/// 和「这份历史现在读不了」是两回事，界面对两者的处置也不同。
+#[tauri::command]
+fn list_hits(state: tauri::State<'_, AppState>, limit: usize) -> Result<Vec<Hit>, String> {
+    match state.hits.as_ref() {
+        Some(log) => log.recent(limit).map_err(|e| e.to_string()),
+        None => Err("找不到系统配置目录，命中历史未启用".to_string()),
+    }
+}
+
+#[tauri::command]
+fn clear_hits(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    match state.hits.as_ref() {
+        Some(log) => log.clear().map_err(|e| e.to_string()),
+        None => Err("找不到系统配置目录，命中历史未启用".to_string()),
+    }
+}
+
+/// 导出 CSV，返回写入的完整路径，并在系统文件管理器里定位到它。
+///
+/// 没有走「另存为」对话框：项目没装 dialog 插件，为一个导出功能多引一个插件
+/// 不划算。写进配置目录再定位出来，用户拿到文件后想放哪都行。
+#[tauri::command]
+fn export_hits(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let log = state
+        .hits
+        .as_ref()
+        .ok_or_else(|| "找不到系统配置目录，命中历史未启用".to_string())?;
+
+    let csv = log.to_csv().map_err(|e| e.to_string())?;
+    let target = log.path().with_file_name("hits.csv");
+    // BOM 是给 Excel 的：没有它，简体中文的门店名和型号名在 Windows 版 Excel
+    // 里会变成乱码 —— 而这份文件的主要用途就是拿去 Excel 里翻。
+    let mut bytes = Vec::with_capacity(csv.len() + 3);
+    bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+    bytes.extend_from_slice(csv.as_bytes());
+    std::fs::write(&target, bytes).map_err(|e| format!("写入 {} 失败：{e}", target.display()))?;
+
+    // 定位失败不算导出失败：文件已经在那了，路径也已经要返回给用户。
+    use tauri_plugin_opener::OpenerExt;
+    let _ = app.opener().reveal_item_in_dir(&target);
+
+    Ok(target.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -455,6 +505,48 @@ async fn dispatch_notification(
     channels.notify(&notification).await
 }
 
+/// 把一次命中写进历史。
+///
+/// 失败只写一条日志，绝不打断提醒流程 —— 留档是附带收益，响铃和推送才是用户
+/// 真正在等的东西，没道理因为磁盘写不进去就把提醒也搭进去。
+///
+/// 这里不做去重：连续命中的合并由 [`HitLog`] 自己按目标和时间间隔处理，
+/// 这一层只管如实上报每一次「确认有货」。
+fn record_hit(app: &AppHandle, state: &TargetState) {
+    let Some(app_state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let Some(log) = app_state.hits.as_ref() else {
+        return;
+    };
+
+    let target = &state.target;
+    let hit = Hit {
+        at_ms: state.last_checked_ms.unwrap_or_else(now_ms),
+        locale: target.locale.clone(),
+        store_number: target.store_number.clone(),
+        store_title: target.store_title.clone(),
+        part_number: target.part_number.clone(),
+        product_name: target.product_name.clone(),
+        pickup_display: state
+            .pickup_details
+            .as_ref()
+            .map(|d| d.pickup_display.clone())
+            .unwrap_or_default(),
+    };
+
+    if let Err(err) = log.record(&hit) {
+        let _ = app.emit(NOTICE_CHANNEL, format!("命中历史写入失败：{err}"));
+    }
+}
+
+/// 当前 Unix 毫秒。只在引擎没给出查询时刻时兜底。
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
 /// 消费引擎事件：转发给前端，并在有货时发提醒。
 async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Event>) {
     while let Some(event) = events.recv().await {
@@ -464,6 +556,7 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
 
         if let Event::InStock { state } = &event {
             let target = &state.target;
+            record_hit(&app, state);
             let settings = app
                 .try_state::<AppState>()
                 .map(|s| s.settings_snapshot())
@@ -692,6 +785,7 @@ pub fn run() {
                 http: reqwest::Client::new(),
                 settings: RwLock::new(settings),
                 store,
+                hits: HitLog::new().ok(),
             });
 
             let handle: AppHandle = app.handle().clone();
@@ -728,6 +822,9 @@ pub fn run() {
             list_stores,
             list_products,
             refresh_products,
+            list_hits,
+            clear_hits,
+            export_hits,
             refresh_stores,
             get_settings,
             save_settings,
