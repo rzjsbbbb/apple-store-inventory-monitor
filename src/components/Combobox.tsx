@@ -54,13 +54,19 @@ export function Combobox({
           role="combobox"
           aria-expanded={open}
           disabled={disabled}
-          className={cn("justify-between font-normal", className)}
+          // min-w-0 是这里的关键，不是随手加的防御。触发器是 .field-group
+          // 这个 grid 的子项，grid/flex 子项的 min-width 默认是 auto —— 意思是
+          // 「不许收缩到内容宽度以下」。于是里面那个 span 的 truncate 永远轮不到
+          // 生效：门店名或 Mac 展示名一长，按钮整个被撑破格子，压到右边的控件上。
+          className={cn("min-w-0 justify-between font-normal", className)}
         >
           <span
             // 触发器宽度是固定的，选中项再长也只能截断；挂个原生 title，
             // 想确认自己选的到底是哪一台时鼠标悬停就能看全。
+            // 同理：span 是按钮这个 inline-flex 的子项，不解开它的 min-width
+            // 就还是不会截断。两处缺一不可。
             title={selected?.label}
-            className={cn("truncate", !selected && "text-muted-foreground")}
+            className={cn("min-w-0 truncate", !selected && "text-muted-foreground")}
           >
             {selected ? selected.label : placeholder}
           </span>
