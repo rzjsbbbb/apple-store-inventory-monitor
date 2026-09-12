@@ -408,6 +408,14 @@ pub const REGIONS: &[Region] = &[
         base_url: "https://www.apple.com/my",
         families: DEFAULT_FAMILIES,
     },
+    // 美国站没有地区路径前缀，`https://www.apple.com` 本身就是入口。
+    // 这也是唯一一个 base_url 不含路径段的地区：拼地址时不要假设末尾有 `/xx`。
+    Region {
+        title: "United States",
+        locale: "en_US",
+        base_url: "https://www.apple.com",
+        families: DEFAULT_FAMILIES,
+    },
 ];
 
 /// 按 locale 查找地区。
@@ -555,7 +563,7 @@ mod tests {
 
     #[test]
     fn 地区表里每个站点都能拼出接口地址() {
-        assert_eq!(REGIONS.len(), 7);
+        assert_eq!(REGIONS.len(), 8);
         let cn = region_by_locale("zh_CN").expect("地区表里应当有中国大陆");
         assert_eq!(
             cn.pickup_message_url(),
@@ -563,6 +571,28 @@ mod tests {
         );
         // 中国大陆用独立域名，不能是 apple.com/cn —— 那正是上游拼错的地方。
         assert!(!cn.base_url.contains("apple.com/cn"));
+
+        // 美国站没有地区路径前缀，是唯一一个 base_url 只有域名的地区。拼地址
+        // 的代码如果假设了「末尾有 /xx」，会在这里露出来。
+        let us = region_by_locale("en_US").expect("地区表里应当有美国");
+        assert_eq!(us.base_url, "https://www.apple.com");
+        assert_eq!(
+            us.pickup_message_url(),
+            "https://www.apple.com/shop/fulfillment-messages"
+        );
+        assert_eq!(us.bag_url(), "https://www.apple.com/shop/bag");
+        assert_eq!(
+            us.store_list_url(),
+            "https://www.apple.com/retail/storelist/"
+        );
+        assert_eq!(
+            us.buy_page_url(&Family {
+                category: Category::Iphone,
+                slug: "iphone-17"
+            }),
+            "https://www.apple.com/shop/buy-iphone/iphone-17"
+        );
+
         assert!(region_by_locale("de_DE").is_none());
 
         for r in REGIONS {

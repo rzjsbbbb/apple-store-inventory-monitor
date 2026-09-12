@@ -47,9 +47,9 @@ const SELECTION: &str = r#"{
 // ---- 内嵌数据 ----
 
 #[test]
-fn 七个地区都能从内嵌数据读出商品与门店() {
+fn 每个地区都能从内嵌数据读出商品与门店() {
     let catalog = Catalog::new();
-    assert_eq!(REGIONS.len(), 7);
+    assert_eq!(REGIONS.len(), 8);
 
     for region in REGIONS {
         let products = catalog
@@ -534,7 +534,10 @@ async fn live_refresh_stores_across_regions() {
         // 门店展示名的构造口径不该因为数据来源不同而变化。
         for s in catalog.stores(locale).unwrap() {
             assert!(!s.number.is_empty(), "{locale} 有编号为空的门店");
-            assert!(s.title.ends_with(&s.name), "{locale} 的展示名不以门店名结尾");
+            assert!(
+                s.title.ends_with(&s.name),
+                "{locale} 的展示名不以门店名结尾"
+            );
         }
     }
 }

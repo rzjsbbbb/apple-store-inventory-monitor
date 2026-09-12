@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn 七个地区的门店列表地址都能拼出来() {
+    fn 每个地区的门店列表地址都能拼出来() {
         use crate::model::REGIONS;
         for region in REGIONS {
             let url = region.store_list_url();

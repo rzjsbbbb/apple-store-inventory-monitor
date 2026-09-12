@@ -461,7 +461,11 @@ export default function App() {
                   )}
                 </div>
 
-                <div className="grid grid-cols-2 gap-3 lg:grid-cols-[0.9fr_0.9fr_1.3fr_2fr]">
+                {/* 两行两列，而不是一行四列。门店名（「Illinois-Orland Square Mall」）和
+                    Mac 展示名动辄四五十个字符，挤在四分之一宽度里几乎必然被截断，
+                    一排省略号谁也认不出自己选的是哪家店、哪台机器。分两行之后每个
+                    控件宽度翻倍，绝大多数展示名可以完整显示。 */}
+                <div className="grid grid-cols-2 gap-3">
                   <div className="field-group">
                     <Label className="control-label">
                       <MapPin className="size-3.5" aria-hidden="true" /> 地区

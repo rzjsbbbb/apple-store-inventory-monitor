@@ -721,6 +721,47 @@ mod tests {
         }
     }
 
+    /// 真实网络回归：美国站的取货语义与亚太站是否一致。
+    ///
+    /// 加地区时真正的风险不在「页面抓不抓得到」—— 那个用普通 HTTP 就能验 ——
+    /// 而在 `fulfillment-messages` 的响应结构。`apple.rs` 的解析器是照亚太站
+    /// 的响应写的，美国站如果字段命名或 `pickupDisplay` 取值不同，表现会是
+    /// **一律「未知」**：不报错、不崩溃，只是永远查不出结果。
+    ///
+    /// 所以这条测试的断言重点是 `!is_unknown()` —— 拿到明确的有货或无货，
+    /// 才说明解析口径对得上。
+    #[tokio::test]
+    #[ignore = "需要本机 Chromium 与 Apple 官网网络"]
+    async fn 真实美国站取货语义与亚太一致() {
+        let region = region_by_locale("en_US").expect("应当有美国地区配置");
+        let fetcher = AppleChromiumFetcher::new();
+        // iPhone 17 256GB 黑色。美国零件号是 LL/A 后缀。
+        let part = vec!["MG464LL/A".to_string()];
+        // 跨四个州取样，避免只验到某一家店的特殊情况。
+        let stores = ["R035", "R271", "R283", "R318"];
+
+        for store in stores {
+            let result = fetcher
+                .pickup(region, store, &part)
+                .await
+                .unwrap_or_else(|error| panic!("美国门店 {store} 查询失败：{error}"));
+            let status = result
+                .parts
+                .get(&part[0])
+                .unwrap_or_else(|| panic!("美国门店 {store} 响应缺少 {}", part[0]));
+            assert_eq!(result.store_number, store);
+            assert!(
+                !status.availability.is_unknown(),
+                "美国门店 {store} 未得到明确库存，说明解析口径对不上：{:?}",
+                status.availability
+            );
+            println!(
+                "store={store} name={} availability={:?} display={:?}",
+                result.store_name, status.availability, status.pickup_display
+            );
+        }
+    }
+
     /// 用户现场回归：Apple Watch 的配置零件号没有 `/shop/product/{part}` 页面，
     /// 但它本身仍可通过库存接口查询。首轮不应再卡到 50 秒暖场超时。
     #[tokio::test]
