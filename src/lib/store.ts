@@ -27,7 +27,7 @@ import type {
   UpdateInfo,
   WatcherEvent,
 } from "./types";
-import { assertNever } from "./types";
+import { assertNever, type Hit } from "./types";
 import { describeCycleRow, describeCycleSummary } from "./monitorLog";
 
 import { describeUpdateError, type UpdateProgress } from "./updateStatus";
@@ -55,6 +55,18 @@ export interface UiState {
    */
   category: Category;
   settings: Settings;
+  /**
+   * 命中历史，最新的在前。
+   *
+   * 不随事件流实时更新：历史由后端按目标合并写盘（连续有货算一次目击），
+   * 前端猜不出哪一条会被合并掉。所以只在打开面板时整份重取，
+   * 保证界面显示的和文件里的完全一致。
+   */
+  hits: Hit[];
+  /** 正在读取命中历史。 */
+  hitsLoading: boolean;
+  /** 历史读不出来时的原因；null 表示正常（含「从没命中过」）。 */
+  hitsError: string | null;
   /** 正在从 Apple 官网刷新型号列表。 */
   refreshing: boolean;
   /**
@@ -96,6 +108,9 @@ let state: UiState = {
   products: [],
   category: "iphone",
   settings: DEFAULT_SETTINGS,
+  hits: [],
+  hitsLoading: false,
+  hitsError: null,
   refreshing: false,
   refreshingStores: false,
   ready: false,
@@ -421,6 +436,44 @@ export async function refreshStores(): Promise<void> {
     pushLog(`更新门店列表失败（仍可使用原有门店）：${String(err)}`);
   } finally {
     update({ refreshingStores: false });
+  }
+}
+
+/** 一次最多取回多少条历史。与后端 MAX_RECORDS 一致，等于「全部」。 */
+const HIT_LIMIT = 2000;
+
+export async function loadHits(): Promise<void> {
+  if (state.hitsLoading) return;
+  update({ hitsLoading: true });
+  try {
+    const hits = await invoke<Hit[]>("list_hits", { limit: HIT_LIMIT });
+    update({ hits, hitsError: null });
+  } catch (err) {
+    // 空列表的意思是「从没命中过」，和「这份历史读不了」是两回事，
+    // 不能把失败显示成前者 —— 那会让用户以为自己从来没抢到过。
+    update({ hitsError: String(err) });
+    pushLog(`读取命中历史失败：${String(err)}`);
+  } finally {
+    update({ hitsLoading: false });
+  }
+}
+
+export async function clearHits(): Promise<void> {
+  try {
+    await invoke("clear_hits");
+    update({ hits: [], hitsError: null });
+    pushLog("已清空命中历史。");
+  } catch (err) {
+    pushLog(`清空命中历史失败：${String(err)}`);
+  }
+}
+
+export async function exportHits(): Promise<void> {
+  try {
+    const path = await invoke<string>("export_hits");
+    pushLog(`命中历史已导出到 ${path}`);
+  } catch (err) {
+    pushLog(`导出命中历史失败：${String(err)}`);
   }
 }
 

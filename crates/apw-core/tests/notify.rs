@@ -562,3 +562,55 @@ async fn 内嵌提示音能真的响一声且并发调用不叠加() {
         "两次并发调用不该叠加播放：{elapsed:?}"
     );
 }
+
+// ---- 命中历史 ----
+
+/// 端到端：一次真实的「持续有货」会在历史里留下几条。
+///
+/// 模拟 watcher 的实际行为 —— 每 30 秒确认一次有货，连续两小时。逐条落盘会写
+/// 240 条，而用户想知道的只是「它出现过」。
+#[test]
+fn 持续有货两小时在历史里只留一次目击() {
+    use apw_core::history::{COALESCE_GAP_MS, Hit, HitLog};
+
+    let mut path = std::env::temp_dir();
+    path.push(format!("apw-hist-e2e-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&path);
+    path.push("hits.jsonl");
+    let log = HitLog::at(path);
+
+    let make = |at_ms: u64| Hit {
+        at_ms,
+        locale: "zh_CN".into(),
+        store_number: "R683".into(),
+        store_title: "上海-环球港".into(),
+        part_number: "MG724CH/A".into(),
+        product_name: "iPhone 17 512GB 黑色".into(),
+        pickup_display: "available".into(),
+    };
+
+    // 两小时、每 30 秒一轮。
+    let rounds = 2 * 60 * 60 / 30;
+    let mut written = 0;
+    for i in 0..rounds {
+        if log.record(&make(i * 30_000)).expect("写历史不该失败") {
+            written += 1;
+        }
+    }
+
+    // 两小时跨过 8 个 15 分钟窗口，所以是 8 条而不是 240 条。
+    let expected = (rounds * 30_000).div_ceil(COALESCE_GAP_MS);
+    assert_eq!(written, expected, "两小时应当只留 {expected} 条");
+    assert_eq!(log.recent(999).unwrap().len() as u64, expected);
+    assert!(
+        written < 10,
+        "逐条落盘会写 {rounds} 条，合并后只有 {written} 条"
+    );
+
+    // 导出的 CSV 要能直接喂给表格软件。
+    let csv = log.to_csv().unwrap();
+    assert_eq!(csv.lines().count() as u64, expected + 1, "表头 + 每条一行");
+    assert!(csv.contains("上海-环球港"));
+
+    log.clear().unwrap();
+}
