@@ -534,7 +534,10 @@ async fn live_refresh_stores_across_regions() {
         // 门店展示名的构造口径不该因为数据来源不同而变化。
         for s in catalog.stores(locale).unwrap() {
             assert!(!s.number.is_empty(), "{locale} 有编号为空的门店");
-            assert!(s.title.ends_with(&s.name), "{locale} 的展示名不以门店名结尾");
+            assert!(
+                s.title.ends_with(&s.name),
+                "{locale} 的展示名不以门店名结尾"
+            );
         }
     }
 }
