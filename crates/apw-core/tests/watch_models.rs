@@ -3,7 +3,7 @@ use apw_core::catalog::Catalog;
 use apw_core::model::{Category, REGIONS};
 
 #[test]
-fn 七个地区的当前手表目录保留官方代数() {
+fn 每个地区的当前手表目录保留官方代数() {
     let catalog = Catalog::new();
     for region in REGIONS {
         let products = catalog.products(region.locale).unwrap();

@@ -35,7 +35,7 @@ fn client() -> AppleClient {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn 七个地区的接口都还能用() {
+async fn 每个地区的接口都还能用() {
     let client = client();
 
     for (locale, store, part) in CASES {

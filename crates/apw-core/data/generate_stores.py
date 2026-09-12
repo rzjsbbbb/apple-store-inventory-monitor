@@ -16,7 +16,7 @@
 
 这一个页面就带着**全球所有地区**的门店列表（27 个 locale），每个元素是一个
 `RmdLocale` 对象，结构与 stores.json 的数组元素逐字段一致 —— 本脚本只是把
-项目支持的那 7 个地区挑出来，原样写下，不做任何改写。因此 stores.json 始终
+项目支持的那几个地区挑出来，原样写下，不做任何改写。因此 stores.json 始终
 是官方载荷的一个忠实子集，日后可以直接和线上数据对 diff。
 
 字段也不做裁剪。`slug`、`telephone`、`address1` 这些 Rust 侧确实没读，但留着
@@ -43,7 +43,7 @@ UA = (
 STORE_LIST_URL = "https://www.apple.com.cn/retail/storelist/"
 
 # 与 crates/apw-core/src/model.rs 的 REGIONS 保持一致（集合一致，顺序未必）。
-LOCALES = ["zh_CN", "zh_HK", "zh_TW", "ja_JP", "en_SG", "en_AU", "en_MY"]
+LOCALES = ["zh_CN", "zh_HK", "zh_TW", "ja_JP", "en_SG", "en_AU", "en_MY", "en_US"]
 
 # 被测试钉死的门店。它们从快照里消失时，cargo test 会失败 —— 但那是在数据
 # 已经被写坏之后。在这里先拦一道，免得一次手滑要靠回滚 git 来收拾。
@@ -219,22 +219,29 @@ def self_test() -> int:
     check_that("缺字段不应当崩", stores_of({"locale": "x"}) == [])
 
     # 校验必须拦住各种残缺。
-    good = {
-        "zh_CN": with_states,
-        "zh_HK": flat,
-        "zh_TW": {"locale": "zh_TW", "store": [{"id": "R713", "name": "台北 101"}]},
-        "ja_JP": {"locale": "ja_JP", "store": [{"id": "R718", "name": "Kyoto"}]},
-        "en_SG": {"locale": "en_SG", "store": [{"id": "R633", "name": "Orchard Road"}]},
-        "en_AU": {"locale": "en_AU", "store": [{"id": "R237", "name": "Sydney"}]},
-        "en_MY": {"locale": "en_MY", "store": [{"id": "R790", "name": "TRX"}]},
-    }
+    #
+    # 这份 fixture 按 LOCALES 现场生成，不写死地区表：新增一个地区时如果还要
+    # 回来手改测试数据，自检就成了加地区路上的绊脚石，而不是护栏。被 PINNED
+    # 钉住的那几个地区要用真编号，其余随便造一个都行。
+    good = {}
+    for lc in LOCALES:
+        pinned = PINNED.get(lc)
+        good[lc] = {
+            "locale": lc,
+            "store": [{"id": pinned or f"RT_{lc}", "name": f"{lc} 测试店"}],
+        }
+    # 覆盖掉两个地区，让两种嵌套结构都进到校验里。
+    good["zh_CN"] = with_states
+    good["zh_HK"] = flat
     check_that("完好数据应当通过", check(good, None) == [])
 
-    missing = {k: v for k, v in good.items() if k != "en_AU"}
-    check_that("缺地区应当被拦下", any("en_AU" in p for p in check(missing, None)))
+    # 拿一个不被 PINNED 钉住的地区做「缺地区」用例，免得同时触发两条规则。
+    spare = next(lc for lc in LOCALES if lc not in PINNED)
+    missing = {k: v for k, v in good.items() if k != spare}
+    check_that("缺地区应当被拦下", any(spare in p for p in check(missing, None)))
 
     empty_id = json.loads(json.dumps(good))
-    empty_id["en_MY"]["store"][0]["id"] = ""
+    empty_id[spare]["store"][0]["id"] = ""
     check_that("空编号应当被拦下", any("id 为空" in p for p in check(empty_id, None)))
 
     dropped_pin = json.loads(json.dumps(good))
@@ -246,14 +253,15 @@ def self_test() -> int:
     check_that("重复编号应当被拦下", any("重复" in p for p in check(dup, None)))
 
     # 跌幅校验：旧快照 10 家、新数据 1 家，必须拒绝。
-    shrunk_prev = [{"locale": "en_AU", "store": [{"id": f"R{i:03d}"} for i in range(10)]}]
+    shrunk_prev = [{"locale": spare, "store": [{"id": f"R{i:03d}"} for i in range(10)]}]
     check_that(
         "门店数暴跌应当被拦下",
         any("跌幅" in p for p in check(good, shrunk_prev)),
     )
 
     # 顺序必须跟着旧文件走，否则 diff 会被整段位移淹掉。
-    shuffled = [{"locale": lc} for lc in ["zh_CN", "zh_HK", "zh_TW", "en_SG", "ja_JP", "en_AU", "en_MY"]]
+    # 用一个与 LOCALES 不同的顺序（首尾对调）来验，同样不写死地区表。
+    shuffled = [{"locale": lc} for lc in [LOCALES[-1], *LOCALES[1:-1], LOCALES[0]]]
     check_that(
         "应当沿用旧文件的地区顺序",
         output_order(shuffled) == [r["locale"] for r in shuffled],
@@ -261,7 +269,7 @@ def self_test() -> int:
     check_that("没有旧文件时退回 LOCALES 顺序", output_order(None) == LOCALES)
     check_that(
         "旧文件缺地区时补在末尾",
-        output_order([{"locale": "en_AU"}]) == ["en_AU"] + [lc for lc in LOCALES if lc != "en_AU"],
+        output_order([{"locale": spare}]) == [spare] + [lc for lc in LOCALES if lc != spare],
     )
 
     # 解析器对坏页面必须抛异常，不能返回空表。

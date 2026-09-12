@@ -42,6 +42,8 @@ REGIONS = {
     "en_SG": ("https://www.apple.com/sg", "en-US,en;q=0.9"),
     "en_AU": ("https://www.apple.com/au", "en-US,en;q=0.9"),
     "en_MY": ("https://www.apple.com/my", "en-US,en;q=0.9"),
+    # 美国站没有地区路径前缀，站点根就是入口。
+    "en_US": ("https://www.apple.com", "en-US,en;q=0.9"),
 }
 
 # 与 crates/apw-core/src/model.rs 的 DEFAULT_FAMILIES 保持一致。
@@ -333,11 +335,19 @@ def self_test() -> int:
     return 0
 
 
-def main() -> int:
+def main(only: list[str] | None = None) -> int:
     here = Path(__file__).resolve().parent
     failed = []
 
-    for locale, (base, accept_language) in REGIONS.items():
+    # 默认全抓。指定 locale 时只重写那几份快照 —— 新增一个地区时，把其余六个
+    # 地区的文件也重写一遍只会凭空制造无关 diff，让评审看不清这次真正改了什么。
+    targets = REGIONS if not only else {k: v for k, v in REGIONS.items() if k in only}
+    unknown = [lc for lc in (only or []) if lc not in REGIONS]
+    if unknown:
+        print(f"认不出的地区：{'、'.join(unknown)}", file=sys.stderr)
+        return 1
+
+    for locale, (base, accept_language) in targets.items():
         pages = []
         broken = False
         for category, slug in FAMILIES:
@@ -391,4 +401,6 @@ def main() -> int:
 if __name__ == "__main__":
     if "--self-test" in sys.argv:
         raise SystemExit(self_test())
-    raise SystemExit(main())
+    # 位置参数就是要抓的 locale，不给则全抓：
+    #     python3 generate.py en_US zh_CN
+    raise SystemExit(main([a for a in sys.argv[1:] if not a.startswith("-")]))
