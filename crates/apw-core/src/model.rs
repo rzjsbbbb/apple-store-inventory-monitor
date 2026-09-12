@@ -237,6 +237,23 @@ impl Region {
         )
     }
 
+    /// 门店总览页地址，用于在线刷新门店目录。
+    ///
+    /// 这个页面的 `__NEXT_DATA__` 里带着**全球所有地区**的门店列表，不只本地区
+    /// 的 —— 因此任意一个能打开的站点都足以刷新任意地区，调用方只需按 locale
+    /// 取自己要的那一段。
+    ///
+    /// 香港是个例外：商店站点前缀是 `/hk-zh`，但零售站挂在 `/hk` 下，
+    /// `/hk-zh/retail/storelist/` 是 404。这里按 locale 单独绕开，理由与
+    /// [`Region::accept_language`] 用 `match` 处理各地区差异相同。
+    pub fn store_list_url(&self) -> String {
+        let base = match self.locale {
+            "zh_HK" => "https://www.apple.com/hk",
+            _ => self.base_url,
+        };
+        format!("{base}/retail/storelist/")
+    }
+
     /// 该地区某个品类下的全部购买页。
     pub fn families_in(
         &self,

@@ -138,6 +138,26 @@ async fn refresh_products(
         .map_err(|e| e.to_string())
 }
 
+/// 从 Apple 官网抓最新门店，替换该地区的内存副本，返回门店数。
+///
+/// 门店此前只有内嵌快照一条来源，Apple 新开一家店，用户得等一个新版本才能
+/// 选到它。这个命令把那条路补上。
+///
+/// 失败不会让门店列表变空或变短：抓取或校验没过时后端一个字都不改，界面继续
+/// 用原来那份 —— 所以前端把失败当成一条提示即可，不必做任何回滚。
+#[tauri::command]
+async fn refresh_stores(
+    state: tauri::State<'_, AppState>,
+    locale: String,
+) -> Result<usize, String> {
+    let region = region_by_locale(&locale).ok_or_else(|| format!("认不出地区 {locale}"))?;
+    state
+        .catalog
+        .refresh_stores(region, &state.http)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn get_settings(state: tauri::State<'_, AppState>) -> Settings {
     state.settings_snapshot()
@@ -708,6 +728,7 @@ pub fn run() {
             list_stores,
             list_products,
             refresh_products,
+            refresh_stores,
             get_settings,
             save_settings,
             get_snapshot,
