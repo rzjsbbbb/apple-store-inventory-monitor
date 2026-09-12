@@ -70,6 +70,7 @@ import {
   openReleasePage,
   openTargetProduct,
   refreshProducts,
+  refreshStores,
   saveSettings,
   setCategory,
   setIntervalSeconds,
@@ -501,10 +502,31 @@ export default function App() {
                   </div>
 
                   <div className="field-group">
-                    <Label className="control-label">
-                      <MapPin className="size-3.5" aria-hidden="true" /> 门店
-                      <span className="font-normal text-muted-foreground">可多选</span>
-                    </Label>
+                    {/* 刷新按钮是 Label 的兄弟节点而不是子节点：放进 <label> 里的话，
+                        点按钮会连带触发 label 的聚焦行为，落到下面的下拉框上。 */}
+                    <div className="flex items-center gap-1.5">
+                      <Label className="control-label">
+                        <MapPin className="size-3.5" aria-hidden="true" /> 门店
+                        <span className="font-normal text-muted-foreground">可多选</span>
+                      </Label>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon-xs"
+                            className="ml-auto size-5 text-muted-foreground hover:text-foreground"
+                            aria-label="从 Apple 官网更新门店列表"
+                            disabled={ui.refreshingStores}
+                            onClick={() => void refreshStores()}
+                          >
+                            <RefreshCw
+                              className={ui.refreshingStores ? "animate-spin" : undefined}
+                            />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>从 Apple 官网更新门店列表</TooltipContent>
+                      </Tooltip>
+                    </div>
                     <MultiCombobox
                       key={`stores-${ui.settings.locale}`}
                       className="control-surface w-full"

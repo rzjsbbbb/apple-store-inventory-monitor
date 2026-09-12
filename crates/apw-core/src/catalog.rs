@@ -53,6 +53,14 @@ pub enum CatalogError {
     #[error("地区 {locale} 的{category}目录没有可抓取的购买页")]
     NoFamilies { locale: String, category: String },
 
+    /// 抓到的门店列表没通过校验，已保留原有数据。
+    ///
+    /// 与 [`CatalogError::PageSchema`] 分开：那个说的是「页面结构不对」，这个
+    /// 说的是「结构对，但内容不可信」。对用户的意思也不同 —— 前者多半要等一个
+    /// 新版本，后者稍后重试就好，而且无论哪种，他现在看到的门店列表都还是好的。
+    #[error("{locale} 的门店列表未通过校验，继续使用原有数据：{detail}")]
+    StoreListRejected { locale: String, detail: String },
+
     /// 刷新时有机型失败。
     ///
     /// `fetched` 是成功抓到并**已经写进缓存**的型号数：为 0 表示这次刷新毫无
@@ -86,6 +94,12 @@ const EMBEDDED_STORES: &str = include_str!("../data/stores.json");
 
 const STORES_FILE: &str = "stores.json";
 
+/// 在线刷新时，门店数相对当前列表的最大允许跌幅。
+///
+/// 中国大陆是门店最多的地区（四十余家），两成意味着一次少掉十家 —— 现实中
+/// 不会发生，所以触发它基本等同于「这份数据有问题」。
+const MAX_STORE_SHRINK: f64 = 0.2;
+
 fn products_file(locale: &str) -> String {
     format!("products_{locale}.json")
 }
@@ -107,8 +121,14 @@ pub struct Catalog {
     /// 地区」，永远不知道是数据坏了。存 `String` 而不是 `CatalogError` 是因为
     /// 它要被反复返回，而 `CatalogError` 携带了不可克隆的 [`ApiError`]。
     offline_products: HashMap<&'static str, Result<Vec<Page>, String>>,
-    /// 门店快照。门店变动远慢于商品，没有在线刷新这条路。
+    /// 门店的内嵌快照。解析一次就不再变，读它不需要同步。
     offline_stores: Result<HashMap<String, Vec<Store>>, String>,
+    /// 在线刷新到的门店，按地区整体覆盖内嵌快照。
+    ///
+    /// **单位是「地区」，与商品那边的「页」不同。** 商品要按页存是因为抓取按页
+    /// 进行、失败也按页发生；门店则是一次请求拿到一整个地区的全量列表，没有
+    /// 「这个地区抓到一半」的中间态 —— 要么整份可信地换掉，要么一个字都不动。
+    online_stores: RwLock<HashMap<String, Vec<Store>>>,
     /// 在线刷新结果，按「地区 + 购买页」覆盖内嵌快照的同一页。
     ///
     /// **单位必须是「页」，不能是「地区」也不能是「品类」。** 抓取是一页一页
@@ -167,6 +187,7 @@ impl Catalog {
         Self {
             offline_products,
             offline_stores: load_stores(EMBEDDED_STORES).map_err(|e| e.to_string()),
+            online_stores: RwLock::new(HashMap::new()),
             online_products: RwLock::new(HashMap::new()),
             current_families: RwLock::new(HashMap::new()),
         }
@@ -254,7 +275,15 @@ impl Catalog {
     }
 
     /// 某地区的全部直营店。
+    ///
+    /// 在线刷新过就用刷到的那份，否则用内嵌快照。**在线失败不影响这里** ——
+    /// 刷新失败时 `online_stores` 里根本不会有这个地区的条目，读路径自动落回
+    /// 内嵌快照，用户手上的门店列表始终是可用的那一份。
     pub fn stores(&self, locale: &str) -> Result<Vec<Store>, CatalogError> {
+        if let Some(stores) = read_lock(&self.online_stores).get(locale) {
+            return Ok(stores.clone());
+        }
+
         let by_locale = self
             .offline_stores
             .as_ref()
@@ -386,6 +415,83 @@ impl Catalog {
             });
         }
         Ok(fetched.len())
+    }
+
+    /// 从 Apple 官网门店总览页抓最新门店，覆盖该地区的内存副本。返回门店数。
+    ///
+    /// 与 [`Catalog::refresh_products`] 的差别在于**没有部分成功这回事**：门店
+    /// 是一次请求拿到一整个地区的全量列表，要么整份通过校验换掉，要么一个字
+    /// 都不动、继续用原来的那份（在线的旧副本或内嵌快照）。
+    ///
+    /// 刷新失败绝不会让用户的门店列表变空或变短 —— 见 [`Catalog::stores`]。
+    ///
+    /// # 刷新之后已有监控项怎么办
+    ///
+    /// 什么都不用做。[`crate::model::Target`] 自带 `store_number` 和
+    /// `store_title`，查询和展示都不经过目录；一家店从列表里消失，只意味着它
+    /// 不再出现在下拉框里，不会影响已经在盯的那些项。这也是为什么
+    /// [`Catalog::store_by_number`] 找不到时返回 `None` 而不是报错。
+    pub async fn refresh_stores(
+        &self,
+        region: &'static Region,
+        http: &reqwest::Client,
+    ) -> Result<usize, CatalogError> {
+        let json = crate::apple_stores::fetch_store_list(http, region).await?;
+
+        // 页面里那段 storeList 与 stores.json 的顶层数组逐字段一致，所以直接走
+        // 同一个解析器：去重、城市推导、顺序的那堆地区特例只该存在一份。
+        let mut by_locale = load_stores(&json).map_err(|err| match err {
+            // 这份数据来自页面而不是 stores.json，照原样报错会指错文件。
+            CatalogError::Corrupt { detail, .. } => CatalogError::PageSchema { detail },
+            other => other,
+        })?;
+
+        let fresh = by_locale.remove(region.locale).ok_or_else(|| {
+            // 页面带的是全球门店，本地区不在里面说明拿错了页或者 Apple 调整了
+            // 地区划分，都不该拿它去覆盖现有数据。
+            CatalogError::StoreListRejected {
+                locale: region.locale.to_string(),
+                detail: format!("页面里有 {} 个地区，但没有这一个", by_locale.len() + 1),
+            }
+        })?;
+
+        self.install_stores(region.locale, fresh)
+    }
+
+    /// 校验并安装一个地区的门店列表，返回安装后的门店数。
+    ///
+    /// 校验的用意与写快照脚本时一样：这条路径真正的事故不是报错，而是**悄悄
+    /// 装进一份残缺列表** —— 它是合法数据，界面不会有任何异常，用户只是发现
+    /// 自己要盯的那家店不见了，而原本好好的那份已经被换掉。所以宁可误拒。
+    fn install_stores(&self, locale: &str, fresh: Vec<Store>) -> Result<usize, CatalogError> {
+        if fresh.is_empty() {
+            return Err(CatalogError::StoreListRejected {
+                locale: locale.to_string(),
+                detail: "没有解析出任何门店".to_string(),
+            });
+        }
+
+        // 跌幅校验。Apple 关店是个位数的事，一次少掉两成只可能是抓到了半份页面
+        // 或者页面改版 —— 那种时候保留旧数据永远是更安全的一侧。
+        //
+        // 注意比较的基准是 `stores()` 而不是内嵌快照：连续刷新时，基准应当是
+        // 用户此刻实际看到的那份。
+        let current = self.stores(locale).map(|s| s.len()).unwrap_or(0);
+        let floor = (current as f64 * (1.0 - MAX_STORE_SHRINK)).ceil() as usize;
+        if current > 0 && fresh.len() < floor {
+            return Err(CatalogError::StoreListRejected {
+                locale: locale.to_string(),
+                detail: format!(
+                    "门店数从 {current} 掉到 {}，跌幅超过 {:.0}%",
+                    fresh.len(),
+                    MAX_STORE_SHRINK * 100.0
+                ),
+            });
+        }
+
+        let count = fresh.len();
+        write_lock(&self.online_stores).insert(locale.to_string(), fresh);
+        Ok(count)
     }
 
     /// 用一页新抓到的商品覆盖该地区同一页的在线副本。
@@ -966,5 +1072,140 @@ mod tests {
         assert!(after.iter().any(|p| p.category == Category::Mac));
         catalog.set_current_families("zh_CN", Category::Iphone, &[]);
         assert_eq!(after, catalog.products("zh_CN").unwrap());
+    }
+
+    // ---- 在线门店刷新 ----
+    //
+    // 抓取那一半在 apple_stores 里自测；这里钉住的是「什么样的数据允许覆盖
+    // 用户手上那份」—— 这条路径真正的风险不是报错，而是悄悄装进一份残缺列表。
+
+    fn store(number: &str, name: &str) -> Store {
+        Store {
+            number: number.to_string(),
+            name: name.to_string(),
+            title: format!("测试-{name}"),
+        }
+    }
+
+    /// 造一份与 `locale` 现有门店数等量的列表，用来绕开跌幅校验。
+    fn same_size_as(catalog: &Catalog, locale: &str) -> Vec<Store> {
+        let n = catalog.stores(locale).expect("应当有门店").len();
+        (0..n)
+            .map(|i| store(&format!("RT{i:03}"), &format!("新店{i}")))
+            .collect()
+    }
+
+    #[test]
+    fn 在线门店会覆盖内嵌快照() {
+        let catalog = Catalog::new();
+        let fresh = same_size_as(&catalog, "zh_CN");
+        let count = catalog
+            .install_stores("zh_CN", fresh.clone())
+            .expect("应当装得进去");
+
+        assert_eq!(count, fresh.len());
+        assert_eq!(catalog.stores("zh_CN").unwrap(), fresh);
+        // 覆盖是按地区整体进行的，不该波及别的地区。
+        assert!(catalog.store_by_number("zh_HK", "R428").is_some());
+        // 被换掉的门店从目录里消失，但那是「查不到」，不是错误。
+        assert!(catalog.store_by_number("zh_CN", "R683").is_none());
+    }
+
+    #[test]
+    fn 空列表不会把门店清空() {
+        // 与 install_page 同一条规矩：把列表清空会让用户的门店下拉框整个空掉，
+        // 而这通常只意味着这一次没抓到东西。
+        let catalog = Catalog::new();
+        let before = catalog.stores("zh_CN").unwrap();
+
+        let err = catalog
+            .install_stores("zh_CN", Vec::new())
+            .expect_err("应当被拒绝");
+        assert!(matches!(err, CatalogError::StoreListRejected { .. }));
+        assert_eq!(catalog.stores("zh_CN").unwrap(), before);
+    }
+
+    #[test]
+    fn 门店数暴跌会被拒绝且保留原有数据() {
+        let catalog = Catalog::new();
+        let before = catalog.stores("zh_CN").unwrap();
+        assert!(before.len() > 10, "这条测试依赖中国大陆有足够多的门店");
+
+        let err = catalog
+            .install_stores("zh_CN", vec![store("RT001", "只剩一家")])
+            .expect_err("应当被拒绝");
+        let text = err.to_string();
+        assert!(text.contains("跌幅"), "{text}");
+        // 关键是：被拒绝之后用户手上那份必须原封不动。
+        assert_eq!(catalog.stores("zh_CN").unwrap(), before);
+    }
+
+    #[test]
+    fn 跌幅在允许范围内可以通过() {
+        let catalog = Catalog::new();
+        let before = catalog.stores("zh_CN").unwrap().len();
+        // 关掉一家店是常有的事，不该被校验拦下。
+        let fresh: Vec<Store> = (0..before - 1)
+            .map(|i| store(&format!("RT{i:03}"), &format!("新店{i}")))
+            .collect();
+
+        assert_eq!(
+            catalog.install_stores("zh_CN", fresh).expect("应当放行"),
+            before - 1
+        );
+    }
+
+    #[test]
+    fn 跌幅基准是当前列表而不是内嵌快照() {
+        // 连续刷新时，基准必须跟着走，否则第二次刷新会拿一份早已被替换掉的
+        // 快照做比较，放过本该拦下的暴跌。
+        let catalog = Catalog::new();
+        let embedded = catalog.stores("en_AU").unwrap().len();
+        let shrunk: Vec<Store> = (0..embedded - 1)
+            .map(|i| store(&format!("RT{i:03}"), &format!("新店{i}")))
+            .collect();
+        catalog
+            .install_stores("en_AU", shrunk)
+            .expect("第一次应当放行");
+
+        let now = catalog.stores("en_AU").unwrap().len();
+        assert_eq!(now, embedded - 1);
+        let floor = (now as f64 * 0.8).ceil() as usize;
+        let too_few: Vec<Store> = (0..floor - 1)
+            .map(|i| store(&format!("RX{i:03}"), &format!("更少{i}")))
+            .collect();
+        assert!(catalog.install_stores("en_AU", too_few).is_err());
+    }
+
+    #[test]
+    fn 没刷新过的地区继续读内嵌快照() {
+        let catalog = Catalog::new();
+        catalog
+            .install_stores("zh_CN", same_size_as(&catalog, "zh_CN"))
+            .expect("应当装得进去");
+
+        // 其余地区一个都不该受影响。
+        for region in REGIONS.iter().filter(|r| r.locale != "zh_CN") {
+            assert_eq!(
+                catalog.stores(region.locale).unwrap(),
+                Catalog::new().stores(region.locale).unwrap(),
+                "{} 的门店不该被动过",
+                region.locale
+            );
+        }
+    }
+
+    #[test]
+    fn 刷新后重复读取顺序稳定() {
+        let catalog = Catalog::new();
+        let fresh = same_size_as(&catalog, "ja_JP");
+        catalog
+            .install_stores("ja_JP", fresh)
+            .expect("应当装得进去");
+        // 下拉框每次打开都在跳是很明显的退步。
+        assert_eq!(
+            catalog.stores("ja_JP").unwrap(),
+            catalog.stores("ja_JP").unwrap()
+        );
     }
 }

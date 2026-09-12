@@ -57,6 +57,14 @@ export interface UiState {
   settings: Settings;
   /** 正在从 Apple 官网刷新型号列表。 */
   refreshing: boolean;
+  /**
+   * 正在从 Apple 官网刷新门店列表。
+   *
+   * 与 `refreshing` 分开而不是共用一个标志：两个按钮各自转各自的圈，用户点了
+   * 哪个就看到哪个在动。共用的话点门店会让型号那个按钮也转起来，看上去像是
+   * 点错了。两者也确实可以同时进行。
+   */
+  refreshingStores: boolean;
   ready: boolean;
   /** 检查到的新版本；null 表示已是最新或还没查。 */
   update: UpdateInfo | null;
@@ -89,6 +97,7 @@ let state: UiState = {
   category: "iphone",
   settings: DEFAULT_SETTINGS,
   refreshing: false,
+  refreshingStores: false,
   ready: false,
   update: null,
   installing: false,
@@ -393,6 +402,25 @@ export async function refreshProducts(): Promise<void> {
     // 是哪来的了。
     await loadCatalog(locale);
     update({ refreshing: false });
+  }
+}
+
+export async function refreshStores(): Promise<void> {
+  if (state.refreshingStores) return;
+  update({ refreshingStores: true });
+  const locale = state.settings.locale;
+  try {
+    const count = await invoke<number>("refresh_stores", { locale });
+    pushLog(`已从 Apple 官网抓到 ${count} 家门店。`);
+    // 只有成功才重载。这一点和 refreshProducts 相反，因为两者的失败形态不同：
+    // 型号是一页一页装的，失败时后端可能已经装进去几页，不重载界面就看不到；
+    // 门店是整份换或整份不换，失败时后端一个字都没改，重载只会拿回同样的数据。
+    await loadCatalog(locale);
+  } catch (err) {
+    // 抓取或校验没过时后端保留原有数据，所以这里只报一句，不动界面上的列表。
+    pushLog(`更新门店列表失败（仍可使用原有门店）：${String(err)}`);
+  } finally {
+    update({ refreshingStores: false });
   }
 }
 

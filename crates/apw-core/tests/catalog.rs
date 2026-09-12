@@ -490,3 +490,51 @@ fn 地区表与内嵌数据一一对应() {
         );
     }
 }
+
+// ---- 门店在线刷新 ----
+
+#[test]
+fn 门店列表地址覆盖全部地区且香港走独立零售站() {
+    for region in REGIONS {
+        let url = region.store_list_url();
+        assert!(
+            url.starts_with("https://") && url.ends_with("/retail/storelist/"),
+            "{} 的门店列表地址不对：{url}",
+            region.locale
+        );
+    }
+
+    // 香港的商店站点前缀是 /hk-zh，但零售站挂在 /hk 下，照 base_url 拼会 404。
+    let hk = REGIONS
+        .iter()
+        .find(|r| r.locale == "zh_HK")
+        .expect("应当有香港");
+    assert_eq!(
+        hk.store_list_url(),
+        "https://www.apple.com/hk/retail/storelist/"
+    );
+}
+
+#[tokio::test]
+#[ignore = "手动检查 Apple 真实门店刷新，需要网络"]
+async fn live_refresh_stores_across_regions() {
+    let http = reqwest::Client::new();
+    for locale in ["zh_CN", "zh_HK", "ja_JP", "en_AU"] {
+        let region = region_by_locale(locale).unwrap();
+        let catalog = Catalog::new();
+        let before = catalog.stores(locale).unwrap().len();
+        let count = catalog
+            .refresh_stores(region, &http)
+            .await
+            .unwrap_or_else(|e| panic!("{locale} 刷新失败：{e}"));
+        println!("{locale}: 内嵌 {before} 家 -> 在线 {count} 家");
+        assert!(count > 0);
+        // 刷新后读到的必须是在线那份。
+        assert_eq!(catalog.stores(locale).unwrap().len(), count);
+        // 门店展示名的构造口径不该因为数据来源不同而变化。
+        for s in catalog.stores(locale).unwrap() {
+            assert!(!s.number.is_empty(), "{locale} 有编号为空的门店");
+            assert!(s.title.ends_with(&s.name), "{locale} 的展示名不以门店名结尾");
+        }
+    }
+}
